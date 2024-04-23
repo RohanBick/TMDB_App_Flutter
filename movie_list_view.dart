@@ -1,0 +1,550 @@
+import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_application_1/models/movie.dart';
+import 'package:flutter_application_1/services/movie_api_service.dart';
+import 'package:flutter_application_1/views/movie_details_view.dart';
+import 'package:flutter_application_1/views/user_favorites_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter_application_1/models/theme_manager.dart';
+import 'package:provider/provider.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_application_1/views/authentication_view.dart'; // Import the authentication view
+import 'package:flutter_application_1/views/userprofile_view.dart'; // Import the profile view
+import 'package:flutter/foundation.dart';
+
+class MovieListView extends StatefulWidget {
+  @override
+  _MovieListViewState createState() => _MovieListViewState();
+}
+
+class _MovieListViewState extends State<MovieListView> {
+  final MovieAPIService _movieAPIService = MovieAPIService();
+  List<Movie> _movies = [];
+  Set<int> _deletedMovieIds = {};
+  List<Movie> _filteredMovies = [];
+
+  final TextEditingController _searchController = TextEditingController();
+  final DatabaseReference _userFavoritesRef =
+      FirebaseDatabase.instance.reference();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDeletedMovies();
+    _fetchMovies();
+    _searchController.addListener(_onSearchChanged);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _onSearchChanged() {
+    setState(() {
+      _filteredMovies = _movies
+          .where((movie) => movie.title
+              .toLowerCase()
+              .contains(_searchController.text.toLowerCase()))
+          .toList();
+    });
+  }
+
+  void _nowPlayingMovies() async {
+    try {
+      List<Movie> movies = await _movieAPIService.nowPlaying();
+      Set<int> favoriteIds =
+          await _fetchFavoriteMovieIds(); // Fetch favorite movie IDs
+      setState(() {
+        // Filter out deleted movies and update favorite status
+        _movies = movies
+            .where((movie) => !_deletedMovieIds.contains(movie.id))
+            .map((movie) {
+          return movie.copyWith(
+              isFavorite: favoriteIds.contains(movie
+                  .id)); // Update isFavorite based on whether ID is in favoriteIds
+        }).toList();
+        _filteredMovies = _movies;
+      });
+    } catch (e) {
+      print('Error fetching movies: $e');
+    }
+  }
+
+  void _mostPopularMovies() async {
+    try {
+      List<Movie> movies = await _movieAPIService.mostPopular();
+      Set<int> favoriteIds =
+          await _fetchFavoriteMovieIds(); // Fetch favorite movie IDs
+      setState(() {
+        // Filter out deleted movies, update favorite status, and then assign to _movies
+        _movies = movies
+            .where((movie) => !_deletedMovieIds.contains(movie.id))
+            .map((movie) {
+          return movie.copyWith(
+              isFavorite: favoriteIds.contains(movie
+                  .id)); // Update isFavorite based on whether ID is in favoriteIds
+        }).toList();
+        _filteredMovies = _movies;
+      });
+    } catch (e) {
+      print('Error fetching movies: $e');
+    }
+  }
+
+  void _topRatedMovies() async {
+    try {
+      List<Movie> movies = await _movieAPIService.topRated();
+      Set<int> favoriteIds =
+          await _fetchFavoriteMovieIds(); // Fetch favorite movie IDs
+      setState(() {
+        // Filter out deleted movies and update the favorite status
+        _movies = movies
+            .where((movie) => !_deletedMovieIds.contains(movie.id))
+            .map((movie) {
+          return movie.copyWith(
+              isFavorite: favoriteIds.contains(movie
+                  .id)); // Update isFavorite based on whether ID is in favoriteIds
+        }).toList();
+        _filteredMovies = _movies;
+      });
+    } catch (e) {
+      print('Error fetching movies: $e');
+    }
+  }
+
+  void _fetchMovies() async {
+    try {
+      List<Movie> movies = await _movieAPIService.fetchMovies();
+      await _updateFavoriteStatus(movies);
+    } catch (e) {
+      print('Error fetching movies: $e');
+    }
+  }
+
+  Future<void> _loadDeletedMovies() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> deletedMovieIdsStringList =
+        prefs.getStringList('deletedMovieIds') ?? [];
+    _deletedMovieIds =
+        deletedMovieIdsStringList.map((id) => int.parse(id)).toSet();
+    setState(() {});
+  }
+
+  Future<void> _deleteMovie(int movieID) async {
+    setState(() {
+      _movies.removeWhere((movie) => movie.id == movieID);
+      _filteredMovies.removeWhere((movie) => movie.id == movieID);
+      _deletedMovieIds.add(movieID);
+    });
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      'deletedMovieIds',
+      _deletedMovieIds.map((id) => id.toString()).toList(),
+    );
+  }
+
+  Future<void> _toggleFavorite(Movie movie) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser != null) {
+      final userUid = currentUser.uid;
+      final favoriteRef = _userFavoritesRef
+          .child('users')
+          .child(userUid)
+          .child('favorites')
+          .child(movie.id.toString());
+      await favoriteRef.set(movie.isFavorite
+          ? null
+          : true); // Set or remove favorite based on current state
+      _updateFavoriteStatus(_movies); // Update favorite status
+    }
+  }
+
+  Future<void> _logout(BuildContext context) async {
+    try {
+      await FirebaseAuth.instance.signOut();
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+            builder: (context) =>
+                AuthenticationView()), // Navigate to the login screen after logging out
+      );
+    } catch (e) {
+      print('Error logging out: $e');
+    }
+  }
+
+  void _navigateToProfile(BuildContext context) {
+    // Get the current user UID from Firebase Authentication
+    String? userUid = FirebaseAuth.instance.currentUser?.uid;
+    if (userUid != null) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => UserProfileView(userUid: userUid),
+        ),
+      );
+    } else {
+      // Handle the case where the user is not authenticated
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('User is not authenticated.'),
+      ));
+    }
+  }
+
+  void _viewAllMovies() {
+    setState(() {
+      _filteredMovies = _movies.toList(); // Show all movies
+    });
+  }
+
+  Future<Set<int>> _fetchFavoriteMovieIds() async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      return {}; // Return an empty set if no user is logged in
+    }
+
+    final userUid = currentUser.uid;
+    final favoritesRef =
+        _userFavoritesRef.child('users').child(userUid).child('favorites');
+    final snapshot = await favoritesRef.once();
+    final dataSnapshot = snapshot.snapshot;
+
+    if (dataSnapshot.value != null) {
+      final favoritesMap =
+          Map<dynamic, dynamic>.from(dataSnapshot.value as Map);
+      return favoritesMap.entries
+          .where((entry) => entry.value == true)
+          .map((entry) => int.parse(entry.key))
+          .toSet();
+    }
+
+    return {};
+  }
+
+  Future<void> _updateFavoriteStatus(List<Movie> movies) async {
+    final Set<int> favoriteIds = await _fetchFavoriteMovieIds();
+    setState(() {
+      _movies = movies
+          .where((movie) => !_deletedMovieIds.contains(movie.id))
+          .map((movie) {
+        return movie.copyWith(isFavorite: favoriteIds.contains(movie.id));
+      }).toList();
+      _filteredMovies = _movies;
+    });
+  }
+
+  void _filterUserFavorites() async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser != null) {
+      final userUid = currentUser.uid;
+      final favoriteRef = FirebaseDatabase.instance
+          .reference()
+          .child('users')
+          .child(userUid)
+          .child('favorites');
+
+      try {
+        final snapshot = await favoriteRef.once();
+        final dataSnapshot = snapshot.snapshot;
+        if (dataSnapshot.value != null) {
+          final Map<dynamic, dynamic>? favorites =
+              dataSnapshot.value as Map<dynamic, dynamic>?;
+
+          if (favorites != null) {
+            final favoriteMovieIds = <int>[];
+            favorites.forEach((key, value) {
+              if (value == true) {
+                favoriteMovieIds.add(int.parse(key.toString()));
+              }
+            });
+
+            // Filter the movies based on user favorites
+            final userFavorites = _movies
+                .where((movie) => favoriteMovieIds.contains(movie.id))
+                .toList();
+
+            setState(() {
+              _filteredMovies = userFavorites;
+            });
+          }
+        } else {
+          setState(() {
+            _filteredMovies = [];
+          });
+        }
+      } catch (e) {
+        print('Error filtering user favorites: $e');
+      }
+    }
+  }
+
+  // void _filterUserFavorites() async {
+  //   final currentUser = FirebaseAuth.instance.currentUser;
+  //   if (currentUser != null) {
+  //     final userUid = currentUser.uid;
+  //     print(userUid);
+  //     final favoriteRef = FirebaseDatabase.instance
+  //         .reference()
+  //         .child('users')
+  //         .child(userUid)
+  //         .child('favorites');
+  //     final favoriteMovieIds = <int>[];
+
+  //     try {
+  //       final snapshot = await favoriteRef.once();
+  //       final dataSnapshot = snapshot.snapshot;
+  //       if (dataSnapshot.value != null) {
+  //         final Map<dynamic, dynamic>? favorites =
+  //             dataSnapshot.value as Map<dynamic, dynamic>?;
+
+  //         if (favorites != null) {
+  //           favorites.forEach((key, value) {
+  //             if (value == true) {
+  //               favoriteMovieIds.add(int.parse(key.toString()));
+  //               print(favoriteMovieIds);
+  //             }
+  //           });
+  //         }
+  //       }
+
+  //       setState(() {
+  //         if (favoriteMovieIds.isNotEmpty) {
+  //           _filteredMovies = _movies
+  //               .where((movie) => favoriteMovieIds.contains(movie.id))
+  //               .toList();
+  //         }
+  //       });
+  //     } catch (e) {
+  //       print('Error filtering user favorites: $e');
+  //     }
+  //   }
+  // }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeManager = Provider.of<ThemeManager>(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Movies List'),
+        actions: [
+          IconButton(
+            // Add a new IconButton for the "Edit Profile" action
+            icon: Icon(Icons.person),
+            onPressed: () {
+              _navigateToProfile(context);
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.lightbulb),
+            onPressed: () {
+              themeManager.toggleTheme();
+            },
+          ),
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'editProfile') {
+                _navigateToProfile(context);
+              } else if (value == 'logout') {
+                _logout(context);
+              } else if (value == 'nowPlaying') {
+                _nowPlayingMovies();
+              } else if (value == 'mostPopular') {
+                _mostPopularMovies();
+              } else if (value == 'topRated') {
+                _topRatedMovies();
+              } else if (value == 'userFavorites') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => UserFavoritesView(),
+                  ),
+                );
+                _fetchMovies();
+              } else if (value == 'viewAll') {
+                _fetchMovies();
+              } else {
+                // Handle other menu options
+              }
+            },
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                value: 'viewAll',
+                child: Text('Recommendations'),
+              ),
+              PopupMenuItem<String>(
+                value: 'topRated',
+                child: Text('Top Rated'),
+              ),
+              PopupMenuItem<String>(
+                value: 'nowPlaying',
+                child: Text('Now Playing'),
+              ),
+              PopupMenuItem<String>(
+                value: 'mostPopular',
+                child: Text('Most Popular'),
+              ),
+              PopupMenuItem<String>(
+                value: 'userFavorites',
+                child: Text('User Favorites'),
+              ),
+              PopupMenuItem<String>(
+                value: 'logout',
+                child: Text('Log Out'),
+              ),
+            ],
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                labelText: 'Search',
+                suffixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          Expanded(
+            child: _filteredMovies.isNotEmpty
+                ? ListView.builder(
+                    itemCount: _filteredMovies.length,
+                    itemBuilder: (BuildContext context, int index) {
+                      final movie = _filteredMovies[index];
+                      return Dismissible(
+                        key: Key(movie.id.toString()),
+                        background: Container(
+                          color: Colors.red,
+                          alignment: Alignment.centerRight,
+                          padding: EdgeInsets.symmetric(horizontal: 20),
+                          child: Icon(Icons.delete, color: Colors.white),
+                        ),
+                        direction: DismissDirection.endToStart,
+                        onDismissed: (direction) async {
+                          await _deleteMovie(movie.id);
+                        },
+                        child: InkWell(
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => MovieDetailsView(
+                                    movieID: movie.id,
+                                    isFavorite: movie.isFavorite),
+                              ),
+                            );
+                          },
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: ListTile(
+                                  leading: FadeInImage.assetNetwork(
+                                    placeholder: 'assets/Roll.png',
+                                    image: movie.posterPath.isNotEmpty
+                                        ? 'https://image.tmdb.org/t/p/w185/${movie.posterPath}'
+                                        : 'assets/Roll.png',
+                                    width: 50,
+                                    height: 70,
+                                    fit: BoxFit.cover,
+                                  ),
+                                  title: Text(movie.title),
+                                ),
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  movie.isFavorite
+                                      ? Icons.favorite
+                                      : Icons.favorite_border,
+                                  color: movie.isFavorite ? Colors.red : null,
+                                ),
+                                onPressed: () => _toggleFavorite(movie),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  )
+                : Center(
+                    child: Text('No movies found.'),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MaterialMovieRowView extends StatelessWidget {
+  final Movie movie;
+
+  const MaterialMovieRowView({Key? key, required this.movie}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: FadeInImage.assetNetwork(
+        placeholder: 'assets/Roll.png',
+        image: movie.posterPath.isNotEmpty
+            ? 'https://image.tmdb.org/t/p/w185/${movie.posterPath}'
+            : 'assets/Roll.png',
+        width: 50,
+        height: 70,
+        fit: BoxFit.cover,
+      ),
+      title: Text(movie.title),
+    );
+  }
+}
+
+class CupertinoMovieRowView extends StatelessWidget {
+  final Movie movie;
+
+  const CupertinoMovieRowView({Key? key, required this.movie})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      onPressed: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => MovieDetailsView(
+                movieID: movie.id, isFavorite: movie.isFavorite),
+          ),
+        );
+      },
+      padding: EdgeInsets.zero,
+      child: Row(
+        children: [
+          FadeInImage.assetNetwork(
+            placeholder: 'assets/Roll.png',
+            image: movie.posterPath.isNotEmpty
+                ? 'https://image.tmdb.org/t/p/w185/${movie.posterPath}'
+                : 'assets/Roll.png',
+            width: 50,
+            height: 70,
+            fit: BoxFit.cover,
+          ),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              movie.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
